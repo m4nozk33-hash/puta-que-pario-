@@ -12,7 +12,7 @@ export default async function Admin() {
   const supabase = createServerClient(url, key, {
     cookies: {
       getAll() { return jar.getAll() },
-      setAll(items) { try { items.forEach(({name,value,options}) => jar.set(name,value,options)) } catch {} }
+      setAll(items: { name: string; value: string; options?: Parameters<typeof jar.set>[2] }[]) { try { items.forEach(({ name, value, options }) => jar.set(name, value, options)) } catch {} }
     }
   })
   const { data: { user }, error } = await supabase.auth.getUser()
