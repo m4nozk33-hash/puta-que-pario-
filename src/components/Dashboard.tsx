@@ -3,13 +3,14 @@
 import {useCallback,useEffect,useMemo,useState} from 'react'
 import Link from 'next/link'
 import {createClient} from '../lib/supabase/client'
+import {createRegistrationClient} from '../lib/supabase/registration'
 import Logout from '../app/admin/sair'
 
 type Scope='agr'|'company'
 type Tenant={id:string;name:string;slug:string;status:string}
 type Staff={id:string;tenant_id:string;full_name:string;employee_code:string|null;position:string;employment_type:string;shift_start:string|null;shift_end:string|null;active:boolean;user_id:string|null}
 type Entry={id:string;tenant_id:string;staff_id:string;kind:string;occurred_at:string;created_at:string;created_by:string;source:string;note:string}
-type Invite={id:string;tenant_id:string;email:string;role:string;created_at:string;accepted_at:string|null}
+type Invite={id:string;tenant_id:string;email:string;full_name:string|null;role:string;created_at:string;accepted_at:string|null}
 type View='inicio'|'empresas'|'clientes'|'funcionarios'|'lancar'|'historico'|'convites'|'configuracoes'
 const positionText:Record<string,string>={garcom:'Garçom',cozinha:'Cozinha',cumim:'Cumim',outro:'Outra função'}
 const kindText:Record<string,string>={entrada:'Entrada',intervalo_inicio:'Início do intervalo',intervalo_fim:'Fim do intervalo',saida:'Saída'}
@@ -44,8 +45,8 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
     sb.from('staff').select('id,tenant_id,full_name,employee_code,position,employment_type,shift_start,shift_end,active,user_id').eq('tenant_id',tenantId!).order('full_name')
   const c=isAgr?sb.from('time_entries').select('id,tenant_id,staff_id,kind,occurred_at,created_at,created_by,source,note').order('occurred_at',{ascending:false}).limit(500):
     sb.from('time_entries').select('id,tenant_id,staff_id,kind,occurred_at,created_at,created_by,source,note').eq('tenant_id',tenantId!).order('occurred_at',{ascending:false}).limit(500)
-  const d=canInvite?(isAgr?sb.from('account_invites').select('id,tenant_id,email,role,created_at,accepted_at').order('created_at',{ascending:false}).limit(100):
-    sb.from('account_invites').select('id,tenant_id,email,role,created_at,accepted_at').eq('tenant_id',tenantId!).order('created_at',{ascending:false}).limit(100)):null
+  const d=canInvite?(isAgr?sb.from('account_invites').select('id,tenant_id,email,full_name,role,created_at,accepted_at').order('created_at',{ascending:false}).limit(100):
+    sb.from('account_invites').select('id,tenant_id,email,full_name,role,created_at,accepted_at').eq('tenant_id',tenantId!).order('created_at',{ascending:false}).limit(100)):null
   const [t,s,e,i]=await Promise.all([a,b,c,d??Promise.resolve({data:[],error:null})])
   const firstError=[t.error,s.error,e.error,i.error].find(Boolean)
   if(firstError)throw new Error(firstError.message)
@@ -78,15 +79,86 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
   e.preventDefault();const f=new FormData(e.currentTarget)
   const tenant=String(f.get('tenant_id')||currentTenant)
   const name=String(f.get('full_name')||'').trim()
+  const email=String(f.get('email')||'').trim().toLowerCase()
+  const password=String(f.get('password')||'')
   if(!tenant||name.length<2){setError('Selecione a empresa e informe o nome completo.');return}
+  if(Boolean(email)!==Boolean(password)){setError('Para criar acesso, informe tanto o e-mail quanto a senha provisória. Ou deixe ambos vazios para cadastrar sem login.');return}
+  if(email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<8||password.length>72)){
+   setError('Informe um e-mail válido e uma senha provisória entre 8 e 72 caracteres.');return
+  }
   const code=String(f.get('employee_code')||'').trim()||null
   const shift=String(f.get('shift_start')||'')||null
   const end=String(f.get('shift_end')||'')||null
   const position=String(f.get('position')||'garcom')
   const employment_type=String(f.get('employment_type')||'fixo')
   const form=e.currentTarget
-  await run(async()=>{const {error}=await createClient().from('staff').insert({tenant_id:tenant,full_name:name,employee_code:code,position,employment_type,shift_start:shift,shift_end:end})
-   if(error)throw error;form.reset();setNotice('Funcionário cadastrado com sucesso.')})
+  await run(async()=>{
+   const sb=createClient()
+   const {data:person,error:staffError}=await sb.from('staff')
+     .insert({tenant_id:tenant,full_name:name,employee_code:code,position,employment_type,shift_start:shift,shift_end:end})
+     .select('id').single()
+   if(staffError)throw staffError
+   form.reset()
+   if(!email){setNotice('Funcionário cadastrado sem acesso ao painel. Você poderá registrar os horários manualmente.');return}
+   const {error:inviteError}=await sb.from('account_invites').insert({
+     tenant_id:tenant,email,full_name:name,role:'employee',staff_id:person.id,invited_by:actorId
+   })
+   if(inviteError){
+    setNotice('Funcionário cadastrado, mas não foi possível preparar seu convite. Abra Acessos e convites e vincule o funcionário manualmente. Nenhuma senha foi salva.')
+    return
+   }
+   // Usar um cliente Auth separado evita trocar a sessão do administrador no navegador.
+   const registration=createRegistrationClient()
+   const {data:signup,error:signupError}=await registration.auth.signUp({
+     email,password,options:{data:{full_name:name}}
+   })
+   if(signupError){
+    setNotice('Funcionário e convite foram cadastrados, mas o acesso ainda não foi criado: '+signupError.message+
+     '. O funcionário pode usar a página Ativar acesso para definir sua própria senha.')
+    return
+   }
+   if(!signup.user?.identities?.length){
+    setNotice('Funcionário e convite registrados. O e-mail pode já pertencer a uma conta existente; nenhuma senha anterior foi alterada. Oriente a pessoa a entrar e ativar o convite.')
+    return
+   }
+   setNotice('Funcionário cadastrado com e-mail e senha provisória. Ele deve confirmar o e-mail, entrar no sistema e ativar o convite em /ativar.')
+  })
+ }
+
+ async function addOwner(e:React.FormEvent<HTMLFormElement>){
+  e.preventDefault()
+  const f=new FormData(e.currentTarget)
+  const tenant=String(f.get('tenant_id')||'')
+  const name=String(f.get('full_name')||'').trim()
+  const email=String(f.get('email')||'').trim().toLowerCase()
+  const password=String(f.get('password')||'')
+  if(!isAgr){setError('Apenas administradores AGR podem conceder acesso a proprietários.');return}
+  if(!tenants.some(t=>t.id===tenant)){setError('Selecione uma empresa existente.');return}
+  if(name.length<2||name.length>150){setError('Informe o nome completo do proprietário.');return}
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<8||password.length>72){
+   setError('Informe um e-mail válido e uma senha provisória entre 8 e 72 caracteres.');return
+  }
+  const form=e.currentTarget
+  await run(async()=>{
+   const {error:inviteError}=await createClient().from('account_invites').insert({
+    tenant_id:tenant,email,full_name:name,role:'company_admin',invited_by:actorId
+   })
+   if(inviteError)throw inviteError
+   form.reset()
+   const {data:signup,error:signupError}=await createRegistrationClient().auth.signUp({
+    email,password,options:{data:{full_name:name}}
+   })
+   if(signupError){
+    setNotice('O convite do proprietário foi cadastrado, mas a criação da conta ainda não foi concluída: '+signupError.message+
+     '. Ele poderá criar a própria senha pela página /ativar.')
+    return
+   }
+   if(!signup.user?.identities?.length){
+    setNotice('Convite do proprietário cadastrado. Este e-mail pode já possuir uma conta; nenhuma senha existente foi alterada. Oriente o dono a entrar com sua senha atual e ativar o convite.')
+    return
+   }
+   setNotice('Proprietário convidado. Ele deverá confirmar o e-mail, entrar com a senha provisória e ativar a empresa pela página /ativar. Seu painel exibirá apenas esta empresa.')
+  })
  }
  async function addEntry(e:React.FormEvent<HTMLFormElement>){
   e.preventDefault();const f=new FormData(e.currentTarget)
@@ -150,9 +222,21 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
      <section className="panel"><h2>Últimas marcações</h2><EntryTable rows={shownEntries.slice(0,8)} staffName={staffName} tenantName={tenantName} showTenant={isAgr}/></section>
     </>}
     {(view==='empresas'||view==='clientes')&&isAgr&&<><div className="content-grid"><section className="panel"><h2>{view==='clientes'?'Clientes cadastrados':'Empresas cadastradas'}</h2><p>Cada empresa tem dados isolados e seu próprio código de acesso.</p><div className="list-stack">{tenants.length?tenants.map(t=><button type="button" className="company-row" key={t.id} onClick={()=>{setSelectedTenant(t.id);setFormTenant(t.id);setView('funcionarios')}}><span className="company-icon">{t.name.slice(0,1).toUpperCase()}</span><span><strong>{t.name}</strong><small>{t.slug}</small></span><span className="pill">{t.status}</span></button>):<p>Nenhuma empresa cadastrada.</p>}</div></section>
-    <section className="panel"><h2>Adicionar empresa</h2><p>Cadastre um novo cliente da AGR.</p><form className="form" onSubmit={addTenant}><label>Nome da empresa<input required name="name" minLength={2} placeholder="Ex.: Restaurante Central"/></label><label>Código da empresa<input required name="slug" minLength={3} maxLength={40} pattern="[a-z0-9][a-z0-9-]{2,39}" placeholder="restaurante-central"/></label><button disabled={busy}>{busy?'Salvando...':'Cadastrar empresa'}</button></form></section></div></>}
+    <section className="panel"><h2>Adicionar empresa</h2><p>Cadastre um novo cliente da AGR.</p><form className="form" onSubmit={addTenant}><label>Nome da empresa<input required name="name" minLength={2} placeholder="Ex.: Restaurante Central"/></label><label>Código da empresa<input required name="slug" minLength={3} maxLength={40} pattern="[a-z0-9][a-z0-9-]{2,39}" placeholder="restaurante-central"/></label><button disabled={busy}>{busy?'Salvando...':'Cadastrar empresa'}</button></form></section></div>
+    {view==='empresas'&&<section className="panel" style={{marginTop:20}}><div className="panel-header"><div><h2>Administrador / proprietário da empresa</h2><p>Crie o acesso do dono ao painel exclusivo da própria empresa. Somente a AGR pode autorizar este perfil.</p></div><span className="pill">Acesso por empresa</span></div>
+    <div className="content-grid"><div><form className="form" onSubmit={addOwner}>
+     <TenantField isAgr={true} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/>
+     <label>Nome completo do proprietário<input required name="full_name" minLength={2} maxLength={150} autoComplete="name" placeholder="Ex.: Maria Oliveira"/></label>
+     <label>Gmail ou e-mail de acesso<input required name="email" type="email" autoComplete="off" placeholder="proprietario@gmail.com"/></label>
+     <label>Senha provisória<input required name="password" type="password" minLength={8} maxLength={72} autoComplete="new-password" placeholder="No mínimo 8 caracteres"/></label>
+     <button type="submit" disabled={busy}>{busy?'Cadastrando...':'Criar acesso do proprietário'}</button>
+    </form></div><div><div className="notice"><strong>Permissões:</strong> o proprietário poderá cadastrar funcionários e freelancers, lançar ponto manual, consultar relatórios e gerenciar acessos da sua empresa. Ele não visualizará outras empresas nem as opções gerais da AGR.</div>
+    <p>O e-mail deve ser confirmado pelo dono. A senha provisória não ficará salva no cadastro e não deve ser compartilhada em grupos. O dono poderá alterá-la depois.</p>
+    <h3>Acessos de proprietários</h3><div className="list-stack">{invites.filter(i=>i.role==='company_admin').map(i=><div className="company-row" key={i.id}><span><strong>{i.full_name||i.email}</strong><small>{i.email} · {tenantName(i.tenant_id)}</small></span><span className="pill">{i.accepted_at?'Ativo':'Pendente'}</span></div>)}{!invites.some(i=>i.role==='company_admin')&&<p>Nenhum proprietário convidado.</p>}</div>
+    </div></div></section>}
+    </>}
     {view==='funcionarios'&&<div className="content-grid"><section className="panel"><h2>Equipe cadastrada</h2><p>Funcionários fixos e freelancers, separados por empresa.</p><div className="table-wrap"><table><thead><tr><th>Funcionário</th>{isAgr&&<th>Empresa</th>}<th>Função</th><th>Vínculo</th><th>Status</th><th>Ação</th></tr></thead><tbody>{shownStaff.map(s=><tr key={s.id}><td><strong>{s.full_name}</strong><br/><small>{s.employee_code||'Sem matrícula'}</small></td>{isAgr&&<td>{tenantName(s.tenant_id)}</td>}<td>{positionText[s.position]||s.position}</td><td>{s.employment_type==='freelancer'?'Freelancer':'Fixo'}</td><td><span className="pill">{s.active?'Ativo':'Inativo'}</span></td><td><button className="mini-button" type="button" disabled={busy} onClick={()=>toggleStaff(s)}>{s.active?'Desativar':'Reativar'}</button></td></tr>)}{!shownStaff.length&&<tr><td colSpan={isAgr?6:5}>Nenhum funcionário cadastrado.</td></tr>}</tbody></table></div></section>
-     <section className="panel"><h2>Adicionar funcionário</h2><p>Cadastre garçons, cozinha, cumins e freelancers.</p><form className="form" onSubmit={addStaff}><TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/><label>Nome completo<input required name="full_name" minLength={2} placeholder="Nome do funcionário"/></label><label>Matrícula (opcional)<input name="employee_code" placeholder="Ex.: 00042"/></label><div className="form-row"><label>Função<select name="position"><option value="garcom">Garçom</option><option value="cozinha">Cozinha</option><option value="cumim">Cumim</option><option value="outro">Outra</option></select></label><label>Vínculo<select name="employment_type"><option value="fixo">Fixo</option><option value="freelancer">Freelancer</option></select></label></div><div className="form-row"><label>Entrada prevista<input type="time" name="shift_start"/></label><label>Saída prevista<input type="time" name="shift_end"/></label></div><button disabled={busy}>{busy?'Salvando...':'Cadastrar funcionário'}</button></form></section></div>}
+     <section className="panel"><h2>Adicionar funcionário</h2><p>Cadastre garçons, cozinha, cumins e freelancers.</p><form className="form" onSubmit={addStaff}><TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/><label>Nome completo<input required name="full_name" minLength={2} placeholder="Nome do funcionário" autoComplete="name"/></label><label>E-mail / Gmail (opcional)<input type="email" name="email" placeholder="nome@gmail.com" autoComplete="off"/></label><label>Senha provisória (opcional)<input type="password" name="password" minLength={8} maxLength={72} placeholder="Mínimo de 8 caracteres" autoComplete="new-password"/></label><p>Para criar o acesso ao painel do funcionário, preencha e-mail e senha. Para freelancers que não precisam de login, deixe os dois campos vazios. A senha não ficará salva no cadastro.</p><label>Matrícula (opcional)<input name="employee_code" placeholder="Ex.: 00042"/></label><div className="form-row"><label>Função<select name="position"><option value="garcom">Garçom</option><option value="cozinha">Cozinha</option><option value="cumim">Cumim</option><option value="outro">Outra</option></select></label><label>Vínculo<select name="employment_type"><option value="fixo">Fixo</option><option value="freelancer">Freelancer</option></select></label></div><div className="form-row"><label>Entrada prevista<input type="time" name="shift_start"/></label><label>Saída prevista<input type="time" name="shift_end"/></label></div><button disabled={busy}>{busy?'Salvando...':'Cadastrar funcionário'}</button></form></section></div>}
     {view==='lancar'&&<div className="content-grid"><section className="panel"><h2>Registrar ponto manual</h2><p>Permitido a qualquer momento para equipe fixa ou freelance. Todas as marcações são auditadas.</p><form className="form" onSubmit={addEntry}>
      <TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/>
      <label>Funcionário<select required name="staff_id" defaultValue="" key={currentTenant}><option value="">Selecione o funcionário</option>{employeesForForm.map(s=><option key={s.id} value={s.id}>{s.full_name} — {positionText[s.position]||s.position}{s.employment_type==='freelancer'?' (freelancer)':''}</option>)}</select></label>
@@ -161,7 +245,7 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
      <button disabled={busy}>{busy?'Salvando...':'Salvar marcação manual'}</button></form></section>
      <section className="panel"><h2>Como funciona</h2><div className="steps"><div><b>1</b><p>Selecione o funcionário de uma empresa.</p></div><div><b>2</b><p>Informe entrada, início e fim do intervalo, ou saída, com os horários corretos.</p></div><div><b>3</b><p>Registre uma justificativa. O sistema conserva autor e data de criação.</p></div></div><div className="notice">Lançamentos manuais não alteram nem apagam registros existentes. Não representam validação biométrica.</div></section></div>}
     {view==='historico'&&<section className="panel"><div className="panel-header"><div><h2>Histórico de marcações</h2><p>Até 500 registros recentes. Exporte o filtro atual para CSV, apenas como relatório de consulta.</p></div><button type="button" className="button" onClick={csv} disabled={!shownEntries.length}>Exportar CSV</button></div><EntryTable rows={shownEntries} staffName={staffName} tenantName={tenantName} showTenant={isAgr}/></section>}
-    {view==='convites'&&canInvite&&<div className="content-grid"><section className="panel"><h2>Convites de acesso</h2><p>Somente o e-mail confirmado pelo convidado pode ativar o vínculo.</p><div className="table-wrap"><table><thead><tr><th>E-mail</th><th>Papel</th><th>Estado</th></tr></thead><tbody>{invites.map(i=><tr key={i.id}><td>{i.email}<br/><small>{tenantName(i.tenant_id)}</small></td><td>{i.role}</td><td>{i.accepted_at?'Ativado':'Pendente'}</td></tr>)}{!invites.length&&<tr><td colSpan={3}>Sem convites cadastrados.</td></tr>}</tbody></table></div></section>
+    {view==='convites'&&canInvite&&<div className="content-grid"><section className="panel"><h2>Convites de acesso</h2><p>Somente o e-mail confirmado pelo convidado pode ativar o vínculo.</p><div className="table-wrap"><table><thead><tr><th>E-mail</th><th>Papel</th><th>Estado</th></tr></thead><tbody>{invites.map(i=><tr key={i.id}><td>{i.full_name&&<strong>{i.full_name}<br/></strong>}{i.email}<br/><small>{tenantName(i.tenant_id)}</small></td><td>{i.role}</td><td>{i.accepted_at?'Ativado':'Pendente'}</td></tr>)}{!invites.length&&<tr><td colSpan={3}>Sem convites cadastrados.</td></tr>}</tbody></table></div></section>
     <section className="panel"><h2>Criar convite</h2><form className="form" onSubmit={addInvite}><TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/><label>E-mail<input required type="email" name="email" placeholder="usuario@empresa.com"/></label><label>Permissão<select name="role" onChange={()=>{}}><option value="employee">Funcionário</option><option value="hr">RH</option>{isAgr&&<option value="company_admin">Administrador da empresa</option>}</select></label><label>Vincular funcionário (obrigatório para permissão Funcionário)<select name="staff_id" defaultValue="" key={currentTenant}><option value="">Selecione</option>{employeesForForm.map(s=><option value={s.id} key={s.id}>{s.full_name}</option>)}</select></label><button disabled={busy}>{busy?'Criando...':'Preparar convite'}</button></form><div className="notice">Compartilhe com o convidado o endereço do sistema seguido de <strong>/ativar</strong>. O envio de e-mail automático ainda não está configurado.</div></section></div>}
     {view==='configuracoes'&&<div className="content-grid"><section className="panel"><h2>Segurança e acesso</h2><p>Contas protegidas pelo Supabase. Dados de empresas separados por políticas de acesso no banco.</p><div className="settings-list"><div><strong>Recuperação de senha</strong><Link href="/forgot-password">Abrir</Link></div><div><strong>Teste de câmera</strong><Link href="/quiosque">Abrir terminal</Link></div><div><strong>Contas vinculadas</strong><button type="button" onClick={()=>setView('convites')} disabled={!canInvite}>Convites</button></div></div></section><section className="panel"><h2>Integrações em preparação</h2><p>Reconhecimento facial com validação de identidade, autorização dos aparelhos da loja e monitoramento por câmeras precisam de integração e homologação específicas. Não estão ativos nesta versão.</p><div className="alert">Não utilize este ambiente como registrador eletrônico de ponto oficial antes da revisão legal e da validação dos requisitos trabalhistas e da LGPD.</div></section></div>}
    </>}
