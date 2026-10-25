@@ -8,7 +8,7 @@ import Logout from '../app/admin/sair'
 
 type Scope='agr'|'company'
 type Tenant={id:string;name:string;slug:string;status:string}
-type Staff={id:string;tenant_id:string;full_name:string;employee_code:string|null;position:string;employment_type:string;shift_start:string|null;shift_end:string|null;active:boolean;user_id:string|null}
+type Staff={id:string;tenant_id:string;full_name:string;employee_code:string|null;position:string;employment_type:string;shift_start:string|null;shift_end:string|null;active:boolean;user_id:string|null;username:string|null;contact_email:string|null}
 type Entry={id:string;tenant_id:string;staff_id:string;kind:string;occurred_at:string;created_at:string;created_by:string;source:string;note:string}
 type Invite={id:string;tenant_id:string;email:string;full_name:string|null;role:string;created_at:string;accepted_at:string|null}
 type View='inicio'|'empresas'|'clientes'|'funcionarios'|'lancar'|'historico'|'convites'|'configuracoes'
@@ -41,8 +41,8 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
  const reload=useCallback(async()=>{
   const sb=createClient()
   const a=isAgr?sb.from('tenants').select('id,name,slug,status').order('name'):sb.from('tenants').select('id,name,slug,status').eq('id',tenantId!)
-  const b=isAgr?sb.from('staff').select('id,tenant_id,full_name,employee_code,position,employment_type,shift_start,shift_end,active,user_id').order('full_name'):
-    sb.from('staff').select('id,tenant_id,full_name,employee_code,position,employment_type,shift_start,shift_end,active,user_id').eq('tenant_id',tenantId!).order('full_name')
+  const b=isAgr?sb.from('staff').select('id,tenant_id,full_name,employee_code,position,employment_type,shift_start,shift_end,active,user_id,username,contact_email').order('full_name'):
+    sb.from('staff').select('id,tenant_id,full_name,employee_code,position,employment_type,shift_start,shift_end,active,user_id,username,contact_email').eq('tenant_id',tenantId!).order('full_name')
   const c=isAgr?sb.from('time_entries').select('id,tenant_id,staff_id,kind,occurred_at,created_at,created_by,source,note').order('occurred_at',{ascending:false}).limit(500):
     sb.from('time_entries').select('id,tenant_id,staff_id,kind,occurred_at,created_at,created_by,source,note').eq('tenant_id',tenantId!).order('occurred_at',{ascending:false}).limit(500)
   const d=canInvite?(isAgr?sb.from('account_invites').select('id,tenant_id,email,full_name,role,created_at,accepted_at').order('created_at',{ascending:false}).limit(100):
@@ -76,55 +76,36 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
   await run(async()=>{const {error}=await createClient().from('tenants').insert({name,slug});if(error)throw error;form.reset();setNotice('Empresa cadastrada. Crie um convite para o administrador dela.')})
  }
  async function addStaff(e:React.FormEvent<HTMLFormElement>){
-  e.preventDefault();const f=new FormData(e.currentTarget)
+  e.preventDefault()
+  const form=e.currentTarget, f=new FormData(form)
   const tenant=String(f.get('tenant_id')||currentTenant)
-  const name=String(f.get('full_name')||'').trim()
-  const email=String(f.get('email')||'').trim().toLowerCase()
+  const full_name=String(f.get('full_name')||'').trim()
+  const username=String(f.get('username')||'').trim().toLowerCase()
+  const contact_email=String(f.get('email')||'').trim().toLowerCase()
   const password=String(f.get('password')||'')
-  if(!tenant||name.length<2){setError('Selecione a empresa e informe o nome completo.');return}
-  if(Boolean(email)!==Boolean(password)){setError('Para criar acesso, informe tanto o e-mail quanto a senha provisória. Ou deixe ambos vazios para cadastrar sem login.');return}
-  if(email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<8||password.length>72)){
-   setError('Informe um e-mail válido e uma senha provisória entre 8 e 72 caracteres.');return
-  }
-  const code=String(f.get('employee_code')||'').trim()||null
-  const shift=String(f.get('shift_start')||'')||null
-  const end=String(f.get('shift_end')||'')||null
+  if(!tenant||full_name.length<2){setError('Selecione a empresa e informe o nome.');return}
+  if(Boolean(username)!==Boolean(password)){setError('Para criar login, informe nome de usuário e senha. Para funcionário sem login, deixe ambos vazios.');return}
+  if(username&&(!/^[a-z][a-z0-9._-]{2,39}$/.test(username)||password.length<8||password.length>72)){setError('O usuário deve ter 3 a 40 caracteres, começar com letra e usar apenas letras minúsculas, números, ponto, traço ou underline. A senha deve ter 8 a 72 caracteres.');return}
+  const employee_code=String(f.get('employee_code')||'').trim()||null
   const position=String(f.get('position')||'garcom')
   const employment_type=String(f.get('employment_type')||'fixo')
-  const form=e.currentTarget
+  const shift_start=String(f.get('shift_start')||'')||null
+  const shift_end=String(f.get('shift_end')||'')||null
   await run(async()=>{
    const sb=createClient()
-   const {data:person,error:staffError}=await sb.from('staff')
-     .insert({tenant_id:tenant,full_name:name,employee_code:code,position,employment_type,shift_start:shift,shift_end:end})
-     .select('id').single()
-   if(staffError)throw staffError
+   if(!username){
+    const {error}=await sb.from('staff').insert({tenant_id:tenant,full_name,contact_email:contact_email||null,employee_code,position,employment_type,shift_start,shift_end})
+    if(error)throw error
+    setNotice('Funcionário cadastrado sem acesso ao painel. É possível lançar ponto manualmente.')
+   }else{
+    const {data,error}=await sb.functions.invoke('register-staff',{body:{tenant_id:tenant,full_name,username,contact_email,employee_code,position,employment_type,shift_start,shift_end,password}})
+    if(error)throw Error('Não foi possível criar acesso. '+(data?.error||error.message))
+    if(!data?.success)throw Error(data?.error||'Conta não criada.')
+    setNotice('Funcionário e login cadastrados no Supabase. Acesso imediato com nome de usuário e senha, sem confirmação por e-mail.')
+   }
    form.reset()
-   if(!email){setNotice('Funcionário cadastrado sem acesso ao painel. Você poderá registrar os horários manualmente.');return}
-   const {error:inviteError}=await sb.from('account_invites').insert({
-     tenant_id:tenant,email,full_name:name,role:'employee',staff_id:person.id,invited_by:actorId
-   })
-   if(inviteError){
-    setNotice('Funcionário cadastrado, mas não foi possível preparar seu convite. Abra Acessos e convites e vincule o funcionário manualmente. Nenhuma senha foi salva.')
-    return
-   }
-   // Usar um cliente Auth separado evita trocar a sessão do administrador no navegador.
-   const registration=createRegistrationClient()
-   const {data:signup,error:signupError}=await registration.auth.signUp({
-     email,password,options:{data:{full_name:name}}
-   })
-   if(signupError){
-    setNotice('Funcionário e convite foram cadastrados, mas o acesso ainda não foi criado: '+signupError.message+
-     '. O funcionário pode usar a página Ativar acesso para definir sua própria senha.')
-    return
-   }
-   if(!signup.user?.identities?.length){
-    setNotice('Funcionário e convite registrados. O e-mail pode já pertencer a uma conta existente; nenhuma senha anterior foi alterada. Oriente a pessoa a entrar e ativar o convite.')
-    return
-   }
-   setNotice('Funcionário cadastrado com e-mail e senha provisória. Ele deve confirmar o e-mail, entrar no sistema e ativar o convite em /ativar.')
   })
  }
-
  async function addOwner(e:React.FormEvent<HTMLFormElement>){
   e.preventDefault()
   const f=new FormData(e.currentTarget)
@@ -235,8 +216,8 @@ export default function Dashboard({scope,tenantId,actorId,actorName,canInvite=tr
     <h3>Acessos de proprietários</h3><div className="list-stack">{invites.filter(i=>i.role==='company_admin').map(i=><div className="company-row" key={i.id}><span><strong>{i.full_name||i.email}</strong><small>{i.email} · {tenantName(i.tenant_id)}</small></span><span className="pill">{i.accepted_at?'Ativo':'Pendente'}</span></div>)}{!invites.some(i=>i.role==='company_admin')&&<p>Nenhum proprietário convidado.</p>}</div>
     </div></div></section>}
     </>}
-    {view==='funcionarios'&&<div className="content-grid"><section className="panel"><h2>Equipe cadastrada</h2><p>Funcionários fixos e freelancers, separados por empresa.</p><div className="table-wrap"><table><thead><tr><th>Funcionário</th>{isAgr&&<th>Empresa</th>}<th>Função</th><th>Vínculo</th><th>Status</th><th>Ação</th></tr></thead><tbody>{shownStaff.map(s=><tr key={s.id}><td><strong>{s.full_name}</strong><br/><small>{s.employee_code||'Sem matrícula'}</small></td>{isAgr&&<td>{tenantName(s.tenant_id)}</td>}<td>{positionText[s.position]||s.position}</td><td>{s.employment_type==='freelancer'?'Freelancer':'Fixo'}</td><td><span className="pill">{s.active?'Ativo':'Inativo'}</span></td><td><button className="mini-button" type="button" disabled={busy} onClick={()=>toggleStaff(s)}>{s.active?'Desativar':'Reativar'}</button></td></tr>)}{!shownStaff.length&&<tr><td colSpan={isAgr?6:5}>Nenhum funcionário cadastrado.</td></tr>}</tbody></table></div></section>
-     <section className="panel"><h2>Adicionar funcionário</h2><p>Cadastre garçons, cozinha, cumins e freelancers.</p><form className="form" onSubmit={addStaff}><TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/><label>Nome completo<input required name="full_name" minLength={2} placeholder="Nome do funcionário" autoComplete="name"/></label><label>E-mail / Gmail (opcional)<input type="email" name="email" placeholder="nome@gmail.com" autoComplete="off"/></label><label>Senha provisória (opcional)<input type="password" name="password" minLength={8} maxLength={72} placeholder="Mínimo de 8 caracteres" autoComplete="new-password"/></label><p>Para criar o acesso ao painel do funcionário, preencha e-mail e senha. Para freelancers que não precisam de login, deixe os dois campos vazios. A senha não ficará salva no cadastro.</p><label>Matrícula (opcional)<input name="employee_code" placeholder="Ex.: 00042"/></label><div className="form-row"><label>Função<select name="position"><option value="garcom">Garçom</option><option value="cozinha">Cozinha</option><option value="cumim">Cumim</option><option value="outro">Outra</option></select></label><label>Vínculo<select name="employment_type"><option value="fixo">Fixo</option><option value="freelancer">Freelancer</option></select></label></div><div className="form-row"><label>Entrada prevista<input type="time" name="shift_start"/></label><label>Saída prevista<input type="time" name="shift_end"/></label></div><button disabled={busy}>{busy?'Salvando...':'Cadastrar funcionário'}</button></form></section></div>}
+    {view==='funcionarios'&&<div className="content-grid"><section className="panel"><h2>Equipe cadastrada</h2><p>Funcionários fixos e freelancers, separados por empresa.</p><div className="table-wrap"><table><thead><tr><th>Funcionário</th>{isAgr&&<th>Empresa</th>}<th>Função</th><th>Vínculo</th><th>Status</th><th>Ação</th></tr></thead><tbody>{shownStaff.map(s=><tr key={s.id}><td><strong>{s.full_name}</strong><br/><small>{s.employee_code||'Sem matrícula'} · {s.username?'Usuário: '+s.username:'Sem login individual'}</small></td>{isAgr&&<td>{tenantName(s.tenant_id)}</td>}<td>{positionText[s.position]||s.position}</td><td>{s.employment_type==='freelancer'?'Freelancer':'Fixo'}</td><td><span className="pill">{s.active?'Ativo':'Inativo'}</span></td><td><button className="mini-button" type="button" disabled={busy} onClick={()=>toggleStaff(s)}>{s.active?'Desativar':'Reativar'}</button></td></tr>)}{!shownStaff.length&&<tr><td colSpan={isAgr?6:5}>Nenhum funcionário cadastrado.</td></tr>}</tbody></table></div></section>
+     <section className="panel"><h2>Adicionar funcionário</h2><p>Cadastre garçons, cozinha, cumins e freelancers.</p><form className="form" onSubmit={addStaff}><TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/><label>Nome completo<input required name="full_name" minLength={2} placeholder="Nome do funcionário" autoComplete="name"/></label><label>Nome de usuário para login (opcional)<input name="username" minLength={3} maxLength={40} pattern="[a-z][a-z0-9._-]{2,39}" placeholder="Ex.: joao.silva" autoComplete="off"/></label><label>Gmail ou e-mail de contato (opcional; pode repetir)<input type="email" name="email" placeholder="contato@gmail.com" autoComplete="off"/></label><label>Senha individual (obrigatória para login)<input type="password" name="password" minLength={8} maxLength={72} placeholder="Mínimo de 8 caracteres" autoComplete="new-password"/></label><p>O e-mail é apenas contato: pode ser pessoal ou da empresa e pode se repetir. Cada acesso exige usuário único e senha pessoal, sem confirmação por e-mail. Para freelancers sem login, deixe usuário e senha vazios.</p><label>Matrícula (opcional)<input name="employee_code" placeholder="Ex.: 00042"/></label><div className="form-row"><label>Função<select name="position"><option value="garcom">Garçom</option><option value="cozinha">Cozinha</option><option value="cumim">Cumim</option><option value="outro">Outra</option></select></label><label>Vínculo<select name="employment_type"><option value="fixo">Fixo</option><option value="freelancer">Freelancer</option></select></label></div><div className="form-row"><label>Entrada prevista<input type="time" name="shift_start"/></label><label>Saída prevista<input type="time" name="shift_end"/></label></div><button disabled={busy}>{busy?'Salvando...':'Cadastrar funcionário'}</button></form></section></div>}
     {view==='lancar'&&<div className="content-grid"><section className="panel"><h2>Registrar ponto manual</h2><p>Permitido a qualquer momento para equipe fixa ou freelance. Todas as marcações são auditadas.</p><form className="form" onSubmit={addEntry}>
      <TenantField isAgr={isAgr} tenants={tenants} formTenant={formTenant} setFormTenant={setFormTenant}/>
      <label>Funcionário<select required name="staff_id" defaultValue="" key={currentTenant}><option value="">Selecione o funcionário</option>{employeesForForm.map(s=><option key={s.id} value={s.id}>{s.full_name} — {positionText[s.position]||s.position}{s.employment_type==='freelancer'?' (freelancer)':''}</option>)}</select></label>
