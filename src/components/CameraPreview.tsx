@@ -18,5 +18,5 @@ export default function CameraPreview(){
    setActive(true)
   }catch(err){setError(err instanceof Error?err.message:'Não foi possível abrir a câmera.')}
  }
- return <div className="camera-box"><div className="camera-preview">{active?<video ref={ref} muted playsInline autoPlay/>:<div className="camera-empty"><span>◎</span><p>Teste de câmera</p></div>}</div><div className="camera-actions"><button type="button" onClick={active?stop:start}>{active?'Desligar câmera':'Testar câmera'}</button><button type="button" disabled title="Biometria ainda não integrada">Registrar ponto (indisponível)</button></div>{error&&<p role="alert" className="alert">{error}</p>}</div>
+ return <div className="camera-box"><div className="camera-preview"><video ref={ref} muted playsInline autoPlay style={{display:active?'block':'none'}}/>{!active&&<div className="camera-empty"><span>◎</span><p>Teste de câmera</p></div>}</div><div className="camera-actions"><button type="button" onClick={active?stop:start}>{active?'Desligar câmera':'Testar câmera'}</button><button type="button" disabled title="Biometria ainda não integrada">Registrar ponto (indisponível)</button></div>{error&&<p role="alert" className="alert">{error}</p>}</div>
 }
